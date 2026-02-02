@@ -1,5 +1,4 @@
-cli cmd use 
-
-
-
--NoProfile -STA -Command "Start-Process ctrlF3-sel-explorer-cli  -WindowStyle Hidden; Start-Sleep 1; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^{F3}')"
+cli use: 
+call the ahk file.
+troubleshooting
+make sure your launch settings for ahk v2 or ahkv2path then path of sel-explorer-cli.ahk
