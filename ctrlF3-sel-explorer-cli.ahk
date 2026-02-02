@@ -1,71 +1,20 @@
 #Requires AutoHotkey v2.0
-#SingleInstance Force
 #Warn
 
-; ============================================================
-; HOTKEY (REGISTERHOTKEY)
-; - No #UseHook
-; - No *, ~, $
-; - No passthrough / resend
-; ============================================================
-^F3:: {
-    SelectActiveThingInExplorer()
-    SetTimer(() => ExitApp(), -3000)  ; exit 3 seconds AFTER Ctrl+F3
+; One-shot CLI:
+; 1) Try active document path (VS Code via copy, else parse title)
+; 2) If not found, select active process EXE
+; Exit codes:
+;   0 = selected something
+;   2 = nothing applicable found
+;   3 = unexpected error
+
+try {
+    ok := SelectActiveThingInExplorer()
+    ExitApp(ok ? 0 : 2)
+} catch {
+    ExitApp(3)
 }
-; ============================================================
-; TRAY MENU (CUSTOM ONLY, WITH ICONS)
-; ============================================================
-InitTrayUI()
-
-InitTrayUI() {
-    ico := A_ScriptDir "\folder.ico"
-    try {
-        if FileExist(ico)
-            TraySetIcon(ico)
-        else
-            TraySetIcon("shell32.dll", 4)
-    }
-
-    A_IconTip := "Explorer Select (Ctrl+F3)"
-
-    A_TrayMenu.Delete()
-
-    A_TrayMenu.Add("Open script folder", OpenScriptFolder_ReuseExplorer)
-    A_TrayMenu.SetIcon("Open script folder", "shell32.dll", 4)
-
-    A_TrayMenu.Add("Edit this script", EditThisScript_Default)
-    A_TrayMenu.SetIcon("Edit this script", "shell32.dll", 70)
-
-    A_TrayMenu.Add("Reload script", ReloadScript)
-    A_TrayMenu.SetIcon("Reload script", "shell32.dll", 239)
-
-    A_TrayMenu.Add()
-
-    A_TrayMenu.Add("Exit", ExitScript)
-    A_TrayMenu.SetIcon("Exit", "shell32.dll", 28)
-}
-
-; ============================================================
-; TRAY COMMANDS
-; ============================================================
-OpenScriptFolder_ReuseExplorer(*) {
-    dir := A_ScriptDir
-
-    try {
-        win := FindAnyExplorerWindow()
-        if IsObject(win) {
-            win.Navigate(dir)
-            ForceActivateWindowHard(win.HWND)
-            return
-        }
-    }
-
-    Run('explorer.exe "' dir '"')
-}
-
-EditThisScript_Default(*) => Edit()
-ReloadScript(*) => Reload()
-ExitScript(*) => ExitApp()
 
 ; ============================================================
 ; CORE LOGIC
@@ -333,8 +282,13 @@ GetProcessPath(pid) {
     try {
         buf := Buffer(65536)
         size := 32768
-        ok := DllCall("Kernel32\QueryFullProcessImageNameW", "Ptr", h, "UInt", 0, "Ptr", buf.Ptr, "UIntP", &size)
-        return ok ? StrGet(buf, size, "UTF-16") : ""
+        success := DllCall("Kernel32\QueryFullProcessImageNameW"
+            , "Ptr", h
+            , "UInt", 0
+            , "Ptr", buf.Ptr
+            , "UIntP", &size
+        )
+        return success ? StrGet(buf, size, "UTF-16") : ""
     } finally {
         DllCall("Kernel32\CloseHandle", "Ptr", h)
     }
