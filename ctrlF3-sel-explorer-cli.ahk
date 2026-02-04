@@ -1,98 +1,73 @@
 #Requires AutoHotkey v2.0
+#SingleInstance Force
 #Warn
 
-; One-shot CLI:
-; 1) Try active document path (VS Code via copy, else parse title)
-; 2) If not found, select active process EXE
-; Exit codes:
-;   0 = selected something
-;   2 = nothing applicable found
-;   3 = unexpected error
+; ================= ENTRY =================
+activeHwnd := WinExist("A")
+if !activeHwnd
+    ExitApp
 
-try {
-    ok := SelectActiveThingInExplorer()
-    ExitApp(ok ? 0 : 2)
-} catch {
-    ExitApp(3)
+title := WinGetTitle("ahk_id " activeHwnd)
+pid   := WinGetPID("ahk_id " activeHwnd)
+
+; ---- 1) try path from window title ----
+path := ""
+if RegExMatch(title, 'i)\b([A-Z]:\\[^:*?"<>|\r\n]+?\.[A-Za-z0-9]{1,12})(?=\s+-\s+|$)', &m)
+    path := m[1]
+else if RegExMatch(title, 'i)\b([A-Z])\\([^:*?"<>|\r\n]+?\.[A-Za-z0-9]{1,12})(?=\s+-\s+|$)', &m2)
+    path := m2[1] ':\' m2[2]
+
+; ---- 2) fallback to process exe ----
+if (path = "" || !FileExist(path)) {
+    hProc := DllCall("Kernel32\OpenProcess", "UInt", 0x1000, "Int", 0, "UInt", pid, "Ptr")
+    if hProc {
+        buf := Buffer(65536)
+        size := 32768
+        if DllCall("Kernel32\QueryFullProcessImageNameW",
+            "Ptr", hProc, "UInt", 0, "Ptr", buf.Ptr, "UIntP", &size)
+            path := StrGet(buf, size, "UTF-16")
+        DllCall("Kernel32\CloseHandle", "Ptr", hProc)
+    }
 }
 
-; ============================================================
-; CORE LOGIC
-; ============================================================
-SelectActiveThingInExplorer() {
-    hwnd := WinExist("A")
-    if !hwnd
-        return false
+if (path != "" && FileExist(path))
+    SelectInExistingExplorer(path)
 
-    pid   := WinGetPID("ahk_id " hwnd)
-    proc  := StrLower(WinGetProcessName("ahk_id " hwnd))
-    title := WinGetTitle("ahk_id " hwnd)
+ExitApp
 
-    path := ""
 
-    if (proc = "code.exe")
-        path := NormalizeDrivePrefix(VSCode_CopyActiveFilePath())
-    else
-        path := NormalizeDrivePrefix(TryGetPathFromTitle(title))
-
-    if (path != "" && FileExist(path)) {
-        ExplorerSelectPreferExisting(path)
-        return true
-    }
-
-    exe := GetProcessPath(pid)
-    if (exe != "" && FileExist(exe)) {
-        ExplorerSelectPreferExisting(exe)
-        return true
-    }
-
-    exe2 := GetProcessPath_WMI(pid)
-    if (exe2 != "" && FileExist(exe2)) {
-        ExplorerSelectPreferExisting(exe2)
-        return true
-    }
-
-    return false
-}
-
-; ============================================================
-; EXPLORER HELPERS
-; ============================================================
-ExplorerSelectPreferExisting(fullPath) {
+; ================= CORE =================
+SelectInExistingExplorer(fullPath) {
     fullPath := Trim(StrReplace(StrReplace(fullPath, "`r"), "`n"))
-    if ExplorerSelectInExistingWindow(fullPath)
-        return
-    Run('explorer.exe /select,"' fullPath '"')
-}
-
-ExplorerSelectInExistingWindow(fullPath) {
-    try {
-        win := FindAnyExplorerWindow()
-        if !IsObject(win)
-            return false
-
-        SplitPath fullPath, &itemName, &folderPath
-        if (itemName = "")
-            return ExplorerNavigateOnly(win, fullPath)
-
-        if !ExplorerNavigateOnly(win, folderPath)
-            return false
-
-        return ExplorerSelectItemInView(win, itemName)
-    } catch {
+    SplitPath fullPath, &itemName, &folderPath
+    if (folderPath = "")
         return false
-    }
+
+    win := FindTopmostExplorerComWindow()
+    if !IsObject(win)
+        return false
+
+    if !ExplorerNavigateOnly(win, folderPath)
+        return false
+
+    if (itemName != "")
+        ExplorerSelectItemInView(win, itemName)
+
+    try WinActivate("ahk_id " win.HWND)
+    return true
 }
 
-FindAnyExplorerWindow() {
-    hwnd := FindTopmostExplorerHwnd_GlobalZ()
-    if !hwnd
+
+; ================= EXPLORER WINDOW SELECTION =================
+FindTopmostExplorerComWindow() {
+    exHwnd := FindTopmostExplorerHwnd_GlobalZ()
+    if !exHwnd
         return 0
 
     sh := ComObject("Shell.Application")
     for w in sh.Windows {
         try {
-            if (w.HWND = hwnd)
+            if (w.HWND = exHwnd)
                 return w
         }
     }
@@ -104,24 +79,22 @@ FindTopmostExplorerHwnd_GlobalZ() {
         try {
             if !DllCall("IsWindowVisible", "ptr", hwnd, "int")
                 continue
-
             cls := WinGetClass("ahk_id " hwnd)
             if (cls != "CabinetWClass" && cls != "ExploreWClass")
                 continue
-
             if (StrLower(WinGetProcessName("ahk_id " hwnd)) != "explorer.exe")
                 continue
-
             return hwnd
         }
     }
     return 0
 }
 
+
+; ================= NAVIGATION / SELECTION =================
 ExplorerNavigateOnly(win, folderPath) {
     try {
         win.Navigate(folderPath)
-        ForceActivateWindowHard(win.HWND)
 
         start := A_TickCount
         while (A_TickCount - start < 1200) {
@@ -146,7 +119,6 @@ ExplorerSelectItemInView(win, itemName) {
             it := folder.ParseName(itemName)
             if IsObject(it) {
                 doc.SelectItem(it, 1|2|4|8)
-                ForceActivateWindowHard(win.HWND)
                 return true
             }
             Sleep 60
@@ -157,87 +129,10 @@ ExplorerSelectItemInView(win, itemName) {
     }
 }
 
-ForceActivateWindowHard(hwnd) {
-    if !hwnd
-        return false
 
-    try WinRestore("ahk_id " hwnd)
-    try WinShow("ahk_id " hwnd)
-
-    try WinActivate("ahk_id " hwnd)
-    if WinActive("ahk_id " hwnd)
-        return true
-
-    fg  := DllCall("User32\GetForegroundWindow", "ptr")
-    meT := DllCall("User32\GetCurrentThreadId", "uint")
-    fgT := fg ? DllCall("User32\GetWindowThreadProcessId", "ptr", fg, "uint*", 0, "uint") : 0
-    tgT := DllCall("User32\GetWindowThreadProcessId", "ptr", hwnd, "uint*", 0, "uint")
-
-    if (fgT && fgT != meT)
-        DllCall("User32\AttachThreadInput", "uint", meT, "uint", fgT, "int", 1)
-    if (tgT && tgT != meT)
-        DllCall("User32\AttachThreadInput", "uint", meT, "uint", tgT, "int", 1)
-
-    static SWP_NOMOVE := 0x0002
-    static SWP_NOSIZE := 0x0001
-    static SWP_SHOWWINDOW := 0x0040
-    static HWND_TOPMOST := -1
-    static HWND_NOTOPMOST := -2
-
-    DllCall("User32\SetWindowPos", "ptr", hwnd, "ptr", HWND_TOPMOST
-        , "int", 0, "int", 0, "int", 0, "int", 0
-        , "uint", SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-
-    DllCall("User32\SetWindowPos", "ptr", hwnd, "ptr", HWND_NOTOPMOST
-        , "int", 0, "int", 0, "int", 0, "int", 0
-        , "uint", SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
-
-    DllCall("User32\BringWindowToTop", "ptr", hwnd)
-    DllCall("User32\SetForegroundWindow", "ptr", hwnd)
-    DllCall("User32\SetFocus", "ptr", hwnd)
-
-    if (tgT && tgT != meT)
-        DllCall("User32\AttachThreadInput", "uint", meT, "uint", tgT, "int", 0)
-    if (fgT && fgT != meT)
-        DllCall("User32\AttachThreadInput", "uint", meT, "uint", fgT, "int", 0)
-
-    return WinActive("ahk_id " hwnd)
-}
-
-; ============================================================
-; UTILITIES
-; ============================================================
-NormalizeDrivePrefix(p) {
-    if (p = "")
-        return ""
-    if RegExMatch(p, 'i)^([A-Z])\\', &m)
-        return m[1] ':\' SubStr(p, 3)
-    return p
-}
-
+; ================= UTILITIES =================
 NormalizePathForCompare(p) {
     return RTrim(StrLower(Trim(p)), "\")
-}
-
-TryGetPathFromTitle(title) {
-    if RegExMatch(title, 'i)\b([A-Z]:\\.+?\.[A-Za-z0-9]{1,12})(?=\s+-\s+|$)', &m)
-        return m[1]
-    if RegExMatch(title, 'i)\b([A-Z])\\(.+?\.[A-Za-z0-9]{1,12})(?=\s+-\s+|$)', &m2)
-        return m2[1] ':\' m2[2]
-    return ""
-}
-
-VSCode_CopyActiveFilePath() {
-    old := ClipboardAll()
-    A_Clipboard := ""
-    Send "+!c"
-    if !ClipWait(0.8) {
-        A_Clipboard := old
-        return ""
-    }
-    p := Trim(A_Clipboard)
-    A_Clipboard := old
-    return p
 }
 
 UrlFileToPath(url) {
@@ -272,33 +167,4 @@ BufferFromUriBytes(s) {
     for j, v in bytes
         NumPut("UChar", v, b, j-1)
     return b
-}
-
-GetProcessPath(pid) {
-    static Q := 0x1000
-    h := DllCall("Kernel32\OpenProcess", "UInt", Q, "Int", 0, "UInt", pid, "Ptr")
-    if !h
-        return ""
-    try {
-        buf := Buffer(65536)
-        size := 32768
-        success := DllCall("Kernel32\QueryFullProcessImageNameW"
-            , "Ptr", h
-            , "UInt", 0
-            , "Ptr", buf.Ptr
-            , "UIntP", &size
-        )
-        return success ? StrGet(buf, size, "UTF-16") : ""
-    } finally {
-        DllCall("Kernel32\CloseHandle", "Ptr", h)
-    }
-}
-
-GetProcessPath_WMI(pid) {
-    try {
-        wmi := ComObjGet("winmgmts:")
-        for p in wmi.ExecQuery("SELECT ExecutablePath FROM Win32_Process WHERE ProcessId=" pid)
-            return p.ExecutablePath
-    }
-    return ""
 }
